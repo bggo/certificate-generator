@@ -1,15 +1,17 @@
-from flask import Flask, request, send_file
+from flask import Flask, render_template, request, send_file
 import os
 import csv
 import zipfile
 import locale
+import uuid
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "generated_certificates"
-TEMPLATE_PATH = "certificate_template.png"
+TEMPLATE_PATH = "static/certificate_template.png"
+SIGNATURE_PATH = "static/signature.png"
 
 # Verificar e definir um caminho seguro para a fonte
 DEFAULT_FONT_PATH = "static/fonts/Arial.ttf"
@@ -50,14 +52,30 @@ def generate_certificate_for_student(name):
     except FileNotFoundError:
         return None
     
+    signature = Image.open(SIGNATURE_PATH).convert("RGBA")
     clear_output_folder()
     
     date = get_current_date()
+    unique_hash = str(uuid.uuid4())[:16]  # Gerar hash aleatória de 12 caracteres
     certificate = template.copy()
     draw = ImageDraw.Draw(certificate)
+    
+    
+    # Adicionar Nome no certificado    
     font = ImageFont.truetype(FONT_PATH, 60)
-    draw.text((1100, 700), name, font=font, fill="black")
-    draw.text((600, 1050), date, font=font, fill="black")
+    draw.text((1050, 700), name, font=font, fill="black")
+
+    # Adicionar data no certificado
+    font_date = ImageFont.truetype(FONT_PATH, 40)
+    draw.text((600, 1100), date, font=font_date, fill="black")
+
+    # Adicionar assinatura no certificado
+    signature_resized = signature.resize((300, 100))  # Ajustar tamanho conforme necessário
+    certificate.paste(signature_resized, (1500, 1050), signature_resized)  # Ajustar posição conforme necessário
+
+    # Adicionar hash pequena no canto inferior
+    font_hash = ImageFont.truetype(FONT_PATH, 10)
+    draw.text((50, 1400), f"ID: {unique_hash}", font=font_hash, fill="black")
     
     output_file = os.path.join(OUTPUT_FOLDER, f"{name.replace(' ', '_')}_certificate.png")
     certificate.save(output_file)
@@ -78,6 +96,7 @@ def generate_certificates(csv_path):
             return None
         
         template = Image.open(TEMPLATE_PATH)
+        signature = Image.open(SIGNATURE_PATH).convert("RGBA")
         clear_output_folder()
         
         with open(csv_path, newline='', encoding='utf-8') as csvfile:
@@ -91,11 +110,29 @@ def generate_certificates(csv_path):
                     continue
                 
                 date = get_current_date()
+                unique_hash = str(uuid.uuid4())[:16]  # Gerar hash aleatória de 12 caracteres
+
                 certificate = template.copy()
                 draw = ImageDraw.Draw(certificate)
+                
+                # Adicionar Nome no certificado
                 font = ImageFont.truetype(FONT_PATH, 60)
-                draw.text((1100, 700), name, font=font, fill="black")
-                draw.text((600, 1050), date, font=font, fill="black")
+                draw.text((1050, 700), name, font=font, fill="black")
+
+                # Adicionar data no certificado
+                font_date = ImageFont.truetype(FONT_PATH, 40)
+                draw.text((600, 1100), date, font=font_date, fill="black")
+
+                # Adicionar assinatura no certificado
+                signature_resized = signature.resize((300, 100))  # Ajustar tamanho conforme necessário
+                certificate.paste(signature_resized, (1500, 1050), signature_resized)  # Ajustar posição conforme necessário
+
+                # Adicionar hash pequena no canto inferior
+                font_hash = ImageFont.truetype(FONT_PATH, 10)
+                draw.text((50, 1400), f"ID: {unique_hash}", font=font_hash, fill="black")
+
+
+
                 output_file = os.path.join(OUTPUT_FOLDER, f"{name.replace(' ', '_')}_certificate.png")
                 certificate.save(output_file)
         
@@ -115,8 +152,7 @@ def generate_certificates(csv_path):
 def index():
     current_date = get_current_date()
     return f'''
-    <link rel="stylesheet" href="https://www.equilibrionline.com.br/wp-includes/css/dist/block-library/style.min.css?ver=6.7.2">
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Bitter|Cabin|Crimson+Text|Droid+Sans|Droid+Serif|Lato|Lobster|Montserrat|Old+Standard+TT|Open+Sans|Oswald|Pacifico|Playfair+Display|PT+Sans|Raleway|Rubik|Source+Sans+Pro|Ubuntu|Roboto">
+    <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
     <h1>Gerador de Certificados</h1>
     <p>Data que será impressa nos certificados: <strong>{current_date}</strong></p>
     <p><a href="/download_template">Baixar modelo de CSV</a></p>
@@ -143,8 +179,7 @@ def aluno():
         return "Erro ao gerar o certificado."
     
     return '''
-    <link rel="stylesheet" href="https://www.equilibrionline.com.br/wp-includes/css/dist/block-library/style.min.css?ver=6.7.2">
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Bitter|Cabin|Crimson+Text|Droid+Sans|Droid+Serif|Lato|Lobster|Montserrat|Old+Standard+TT|Open+Sans|Oswald|Pacifico|Playfair+Display|PT+Sans|Raleway|Rubik|Source+Sans+Pro|Ubuntu|Roboto">
+    <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
     <h1>Emitir Certificado</h1>
     <form action="/aluno" method="post">
         <label for="name">Digite seu nome:</label>
@@ -168,7 +203,11 @@ def upload_file():
     if not zip_path:
         return "Erro ao gerar os certificados. Verifique o arquivo CSV."
     
-    return f"<h1>Certificados gerados!</h1><p><a href='/download_zip'>Clique aqui para baixar</a></p>"
+    return '''
+    <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+    <h1>Certificados gerados!</h1><p><a href='/download_zip'>Clique aqui para baixar</a></p>
+    '''
+
 
 @app.route('/download_zip')
 def download_zip():

@@ -115,6 +115,8 @@ def generate_certificates(csv_path):
 def index():
     current_date = get_current_date()
     return f'''
+    <link rel="stylesheet" href="https://www.equilibrionline.com.br/wp-includes/css/dist/block-library/style.min.css?ver=6.7.2">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Bitter|Cabin|Crimson+Text|Droid+Sans|Droid+Serif|Lato|Lobster|Montserrat|Old+Standard+TT|Open+Sans|Oswald|Pacifico|Playfair+Display|PT+Sans|Raleway|Rubik|Source+Sans+Pro|Ubuntu|Roboto">
     <h1>Gerador de Certificados</h1>
     <p>Data que será impressa nos certificados: <strong>{current_date}</strong></p>
     <p><a href="/download_template">Baixar modelo de CSV</a></p>
@@ -141,6 +143,8 @@ def aluno():
         return "Erro ao gerar o certificado."
     
     return '''
+    <link rel="stylesheet" href="https://www.equilibrionline.com.br/wp-includes/css/dist/block-library/style.min.css?ver=6.7.2">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Bitter|Cabin|Crimson+Text|Droid+Sans|Droid+Serif|Lato|Lobster|Montserrat|Old+Standard+TT|Open+Sans|Oswald|Pacifico|Playfair+Display|PT+Sans|Raleway|Rubik|Source+Sans+Pro|Ubuntu|Roboto">
     <h1>Emitir Certificado</h1>
     <form action="/aluno" method="post">
         <label for="name">Digite seu nome:</label>

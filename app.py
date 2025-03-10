@@ -296,6 +296,7 @@ def index():
             <li><a href="/aluno">Emitir Certificado Individual</a></li>
             <li><a href="/lote">Emitir Certificados em Lote (CSV)</a></li>
             <li><a href="/validar">Validar Certificado</a></li>
+            <li><a href="/listagem">Validar Certificado</a></li>
         </ul>
     </body>
     </html>
@@ -773,6 +774,261 @@ def download_certificado(codigo):
 @app.route('/favicon.ico')
 def favicon():
     return "", 204
+
+
+@app.route('/listagem')
+def listar_certificados():
+    global db
+
+    if db is None:
+        return "❌ Firestore não foi inicializado!", 500
+
+    try:
+        # Busca todos os certificados
+        certificados_ref = db.collection("certificados")
+        certificados_docs = certificados_ref.stream()
+
+        # Constrói uma lista com os dados
+        certificados = []
+        for doc in certificados_docs:
+            data = doc.to_dict()
+            certificados.append({
+                "nome": data.get('nome'),
+                "data_emissao": data.get('data_emissao'),
+                "codigo": data.get('codigo')
+            })
+
+        # Garante ordenação por data ou nome (opcional)
+        certificados.sort(key=lambda x: x['nome'])
+
+        # Monta o base_url seguro
+        scheme = request.headers.get('X-Forwarded-Proto', 'https')
+        host = request.headers.get('Host')
+        base_url = f"{scheme}://{host}"
+
+        # Cria o HTML
+        table_rows = ""
+        for cert in certificados:
+            validar_url = f"{base_url}/validar?codigo={cert['codigo']}"
+            download_url = f"{base_url}/download_cert/{cert['codigo']}"
+            table_rows += f"""
+                <tr>
+                    <td>{cert['nome']}</td>
+                    <td>{cert['data_emissao']}</td>
+                    <td>{cert['codigo']}</td>
+                    <td>
+                        <a href="{validar_url}" target="_blank">🔎 Validar</a> |
+                        <a href="{download_url}">⬇️ Baixar</a>
+                    </td>
+                </tr>
+            """
+
+        # Retorna a página com o CSS já aplicado
+        return f"""
+        <html>
+        <head>
+            <title>Lista de Certificados Emitidos</title>
+            <link rel="stylesheet" href="{base_url}/static/styles.css">
+            <style>
+                table {{
+                    border-collapse: collapse;
+                    width: 100%;
+                    margin-top: 20px;
+                }}
+                th, td {{
+                    text-align: left;
+                    padding: 8px;
+                    border-bottom: 1px solid #ddd;
+                }}
+                th {{
+                    background-color: #f2f2f2;
+                }}
+                tr:hover {{background-color: #f5f5f5;}}
+                .back-link {{
+                    margin-top: 20px;
+                    display: inline-block;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>📋 Lista de Certificados Emitidos</h1>
+            <table>
+                <tr>
+                    <th>Nome</th>
+                    <th>Data de Emissão</th>
+                    <th>ID</th>
+                    <th>Ações</th>
+                </tr>
+                {table_rows}
+            </table>
+            <a class="back-link" href="/">🔙 Voltar ao Início</a>
+        </body>
+        </html>
+        """
+
+    except Exception as e:
+        print(f"❌ Erro ao listar certificados: {e}")
+        return f"❌ Erro ao listar certificados: {e}", 500
+
+##### Turmas
+
+@app.route('/turmas/criar', methods=['GET', 'POST'])
+def criar_turma():
+    global db
+    if db is None:
+        return "❌ Firestore não inicializado!", 500
+
+    base_url = request.host_url.rstrip('/')
+
+    if request.method == 'POST':
+        nome = request.form.get('nome')
+        data_evento = request.form.get('data_evento')
+
+        if not nome or not data_evento:
+            return "❌ Nome e Data do Evento são obrigatórios."
+
+        try:
+            turma_id = str(uuid.uuid4())[:16]  # ID único da turma
+
+            # Salva no Firestore na coleção "turmas"
+            doc_ref = db.collection("turmas").document(turma_id)
+            doc_ref.set({
+                "id": turma_id,
+                "nome": nome,
+                "data_evento": data_evento
+            })
+
+            print(f"✅ Turma criada: {nome} - {data_evento} (ID: {turma_id})")
+
+            return f'''
+            <html>
+            <head>
+                <title>Turma Criada</title>
+                <link rel="stylesheet" href="{base_url}/static/styles.css">
+            </head>
+            <body>
+                <h1>✅ Turma Criada com Sucesso!</h1>
+                <p><strong>Nome da Turma:</strong> {nome}</p>
+                <p><strong>Data do Evento:</strong> {data_evento}</p>
+                <p><strong>ID da Turma:</strong> {turma_id}</p>
+                <a href="/turmas/criar">➕ Criar Nova Turma</a><br>
+                <a href="/turmas">📋 Ver Turmas Criadas</a><br>
+                <a href="/">🔙 Voltar ao Início</a>
+            </body>
+            </html>
+            '''
+
+        except Exception as e:
+            print(f"❌ Erro ao criar turma: {e}")
+            return f"❌ Erro ao criar turma: {e}", 500
+
+    # Se for GET, exibe o formulário
+    return f'''
+    <html>
+    <head>
+        <title>Criar Nova Turma</title>
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
+    </head>
+    <body>
+        <h1>➕ Criar Nova Turma</h1>
+        <form method="post">
+            <label for="nome">Nome da Turma:</label><br>
+            <input type="text" id="nome" name="nome" required><br><br>
+
+            <label for="data_evento">Data do Evento:</label><br>
+            <input type="date" id="data_evento" name="data_evento" required><br><br>
+
+            <button type="submit">Criar Turma</button>
+        </form>
+        <br>
+        <a href="/">🔙 Voltar ao Início</a>
+    </body>
+    </html>
+    '''
+
+
+@app.route('/turmas')
+def listar_turmas():
+    global db
+    if db is None:
+        return "❌ Firestore não inicializado!", 500
+
+    try:
+        turmas_ref = db.collection("turmas")
+        turmas_docs = turmas_ref.stream()
+
+        turmas = []
+        for doc in turmas_docs:
+            data = doc.to_dict()
+            turmas.append({
+                "id": data.get('id'),
+                "nome": data.get('nome'),
+                "data_evento": data.get('data_evento')
+            })
+
+        # Ordena pelo nome da turma (opcional)
+        turmas.sort(key=lambda x: x['nome'])
+
+        base_url = request.host_url.rstrip('/')
+
+        table_rows = ""
+        for turma in turmas:
+            table_rows += f"""
+                <tr>
+                    <td>{turma['id']}</td>
+                    <td>{turma['nome']}</td>
+                    <td>{turma['data_evento']}</td>
+                </tr>
+            """
+
+        return f'''
+        <html>
+        <head>
+            <title>Lista de Turmas</title>
+            <link rel="stylesheet" href="{base_url}/static/styles.css">
+            <style>
+                table {{
+                    border-collapse: collapse;
+                    width: 100%;
+                    margin-top: 20px;
+                }}
+                th, td {{
+                    text-align: left;
+                    padding: 8px;
+                    border-bottom: 1px solid #ddd;
+                }}
+                th {{
+                    background-color: #f2f2f2;
+                }}
+                tr:hover {{background-color: #f5f5f5;}}
+                .back-link {{
+                    margin-top: 20px;
+                    display: inline-block;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>📋 Lista de Turmas</h1>
+            <table>
+                <tr>
+                    <th>ID da Turma</th>
+                    <th>Nome da Turma</th>
+                    <th>Data do Evento</th>
+                </tr>
+                {table_rows}
+            </table>
+            <br>
+            <a href="/turmas/criar">➕ Criar Nova Turma</a><br>
+            <a href="/">🔙 Voltar ao Início</a>
+        </body>
+        </html>
+        '''
+
+    except Exception as e:
+        print(f"❌ Erro ao listar turmas: {e}")
+        return f"❌ Erro ao listar turmas: {e}", 500
+
+
 
 if __name__ == '__main__':
     print("Rotas disponíveis:")

@@ -19,7 +19,7 @@ ENV LC_ALL=pt_BR.UTF-8
 COPY . .
 
 # Instalar dependências do Python
-RUN pip install flask pillow
+RUN pip install flask pillow google-cloud-firestore google-cloud-secret-manager qrcode
 # Expor a porta para o Cloud Run
 EXPOSE 8080
 

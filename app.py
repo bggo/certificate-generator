@@ -15,6 +15,16 @@ import qrcode
 from urllib.parse import quote_plus
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
+import logging
+
+# Configura o logger básico
+logging.basicConfig(
+    level=logging.INFO,  # Pode trocar para DEBUG se quiser mais detalhe
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+
+# Cria o logger
+logger = logging.getLogger(__name__)
 
 
 
@@ -53,6 +63,19 @@ def get_firestore_client():
         print(f"❌ Erro ao inicializar Firestore com Secret Manager: {e}")
         return None
 
+
+### Garantir tudo como
+def get_secure_base_url():
+    scheme = request.headers.get('X-Forwarded-Proto', 'https')
+    host = request.headers.get('Host')
+    
+    # Força HTTPS se não for
+    if not scheme or scheme != 'https':
+        scheme = 'https'
+
+    return f"{scheme}://{host}"
+
+
 db = get_firestore_client()
 
 if db:
@@ -62,7 +85,7 @@ else:
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "generated_certificates"
-TEMPLATE_PATH = "static/certificate_template.png"
+TEMPLATE_PATH = "static/certificate.png"
 SIGNATURE_PATH = "static/signature.png"
 
 # Inicializar Firestore
@@ -86,6 +109,31 @@ except locale.Error:
     except locale.Error:
         print("Aviso: Não foi possível definir a localidade para português do Brasil.")
 
+def get_font_by_name_length(name):
+    length = len(name)
+
+    if length <= 12:
+        font_size = 60
+    elif length <= 20:
+        font_size = 50
+    elif length <= 30:
+        font_size = 40
+    else:
+        font_size = 30
+
+    print(f"✅ Nome: {name} (len: {length}) | Usando fonte de tamanho {font_size}")
+
+    # Usa o caminho já definido anteriormente
+    if os.path.exists(DEFAULT_FONT_PATH):
+        font_path = DEFAULT_FONT_PATH
+    elif os.path.exists(FALLBACK_FONT_PATH):
+        font_path = FALLBACK_FONT_PATH
+    else:
+        raise FileNotFoundError("❌ Nenhuma fonte disponível encontrada!")
+    
+    return ImageFont.truetype(font_path, font_size)
+
+
 # Obter data atual formatada corretamente
 def get_current_date():
     return datetime.now().strftime("%d de %B de %Y")
@@ -101,18 +149,51 @@ def clear_output_folder():
             print(f"Erro ao limpar arquivo {file_path}: {e}")
 
 # Função para salvar certificado no Firestore
-def save_certificate_to_firestore(name, date, unique_hash):
-    global db 
+def save_certificate_to_firestore(
+    nome,
+    data_emissao,
+    codigo,
+    turma_nome=None,
+    data_evento=None,
+    nome_treinamento=None,
+    carga_horaria=None
+):
+    global db
+
     try:
-        doc_ref = db.collection("certificados").document(unique_hash)
-        doc_ref.set({
-            "nome": name,
-            "data_emissao": date,
-            "codigo": unique_hash
-        })
-        print(f"Certificado salvo no Firestore para {name} (ID: {unique_hash})")
+        logger.info(f"💾 Salvando certificado no Firestore: Nome={nome}, Código={codigo}")
+
+        if db is None:
+            logger.error("❌ Firestore não inicializado!")
+            return False
+
+        # Monta o dicionário com os dados obrigatórios
+        certificado_data = {
+            'nome': nome,
+            'data_emissao': data_emissao,
+            'codigo': codigo
+        }
+
+        # Adiciona as informações opcionais se estiverem disponíveis
+        if turma_nome:
+            certificado_data['turma_nome'] = turma_nome
+        if data_evento:
+            certificado_data['data_evento'] = data_evento
+        if nome_treinamento:
+            certificado_data['nome_treinamento'] = nome_treinamento
+        if carga_horaria:
+            certificado_data['carga_horaria'] = carga_horaria
+
+        # Salva ou atualiza no Firestore
+        db.collection("certificados").document(codigo).set(certificado_data)
+
+        logger.info(f"✅ Certificado salvo no Firestore com sucesso! Dados: {certificado_data}")
+        return True
+
     except Exception as e:
-        print(f"Erro ao salvar certificado no Firestore: {e}")
+        logger.error(f"❌ Erro ao salvar certificado no Firestore: {e}")
+        return False
+
 
 def normalizar_base_url(base_url):
     # Garante que a URL termine com /
@@ -142,63 +223,252 @@ def gerar_qr_code(codigo, base_url=None):
     qr_img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
     return qr_img
 
-
-# Gerar certificado para um único aluno
-def generate_certificate_for_student(name, base_url):
+def montar_certificado_imagem(
+    nome,
+    data_emissao,
+    codigo,
+    base_url,
+    turma_nome=None,
+    data_evento=None,
+    nome_treinamento=None,
+    carga_horaria=None
+):
     try:
-        template = Image.open(TEMPLATE_PATH)
-    except FileNotFoundError:
+        logger.info(f"🖼️ Iniciando montagem do certificado para {nome} (ID: {codigo})")
+
+        # === Carrega o template ===
+        try:
+            template = Image.open(TEMPLATE_PATH)
+            logger.info(f"✅ Template carregado com sucesso: {TEMPLATE_PATH}")
+        except Exception as e:
+            logger.error(f"❌ Erro ao carregar o template: {e}")
+            return None
+
+        # === Carrega a assinatura ===
+        try:
+            signature = Image.open(SIGNATURE_PATH).convert("RGBA")
+            logger.info(f"✅ Assinatura carregada com sucesso: {SIGNATURE_PATH}")
+        except Exception as e:
+            logger.error(f"❌ Erro ao carregar a assinatura: {e}")
+            return None
+
+        # === Prepara a cópia do template para desenhar ===
+        certificate = template.copy()
+        draw = ImageDraw.Draw(certificate)
+
+        # === NOME DO PARTICIPANTE ===
+        try:
+            font_nome = get_font_by_name_length(nome)
+
+            bbox = draw.textbbox((0, 0), nome, font=font_nome)
+            text_width = bbox[2] - bbox[0]
+            cert_width, _ = certificate.size
+            
+            offset_x = 200  # ➡️ Ajuste esse valor para calibrar
+            nome_x = (cert_width - text_width) / 2 + offset_x
+            nome_y = 650
+
+            logger.info(f"✍️ Desenhando nome: '{nome}' (Fonte: {font_nome.size}px) em x={nome_x}, y={nome_y}")
+            draw.text((nome_x, nome_y), nome, font=font_nome, fill="black")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao desenhar o nome no certificado: {e}")
+            return None
+
+        # === DATA DE EMISSÃO ===
+        try:
+            font_date = ImageFont.truetype(FONT_PATH, 40)
+            draw.text((600, 1100), data_emissao, font=font_date, fill="black")
+            logger.info(f"🗓️ Data de emissão desenhada: {data_emissao}")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao desenhar a data de emissão: {e}")
+            return None
+
+        # === ASSINATURA ===
+        try:
+            signature_resized = signature.resize((300, 100))
+            certificate.paste(signature_resized, (1500, 1050), signature_resized)
+            logger.info("🖋️ Assinatura colada com sucesso!")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao colar a assinatura: {e}")
+            return None
+
+        # === CÓDIGO/ID ===
+        try:
+            font_hash = ImageFont.truetype(FONT_PATH, 10)
+            codigo_texto = f"ID: {codigo}"
+            draw.text((50, 1400), codigo_texto, font=font_hash, fill="black")
+            logger.info(f"🔐 Código desenhado: {codigo_texto}")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao desenhar o código/ID: {e}")
+            return None
+
+        # === QR CODE ===
+        try:
+            qr_img = gerar_qr_code(codigo, base_url)
+            qr_size = 150
+            qr_resized = qr_img.resize((qr_size, qr_size))
+
+            cert_width, cert_height = certificate.size
+            qr_x = cert_width - qr_size - 50
+            qr_y = cert_height - qr_size - 50
+
+            certificate.paste(qr_resized, (qr_x, qr_y))
+            logger.info(f"📲 QR Code colado na posição x={qr_x}, y={qr_y}")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao gerar ou colar o QR Code: {e}")
+            return None
+
+        # === INFORMAÇÕES ADICIONAIS ===
+        # === INFORMAÇÕES ADICIONAIS ===
+        try:
+            font_info = ImageFont.truetype(FONT_PATH, 20)
+            font_info_title = ImageFont.truetype(FONT_PATH, 35)
+
+            # 🔹 Parte 1: Informações que ficam no laço (Turma e Data do Evento)
+            info_lines = []
+            if turma_nome:
+                info_lines.append(f"Turma: {turma_nome}")
+            if data_evento:
+                info_lines.append(f"Data do evento: {data_evento}")
+
+            info_x = 50
+            start_y = 1320  # Começa antes para dar espaço
+            line_height = 25
+
+            for i, line in enumerate(info_lines):
+                y = start_y + i * line_height
+                draw.text((info_x, y), line, font=font_info, fill="black")
+                logger.info(f"📝 Informação adicional desenhada: {line} em x={info_x}, y={y}")
+
+            # 🔹 Parte 2: Nome do treinamento (posição personalizada)
+            if nome_treinamento:
+                treinamento_x = 600  # ➡️ Altere conforme o template
+                treinamento_y = 900  # ➡️ Altere conforme o template
+                treinamento_text = f"{nome_treinamento}"
+                draw.text((treinamento_x, treinamento_y), treinamento_text, font=font_info_title, fill="black")
+                logger.info(f"📝 Nome do treinamento desenhado: {treinamento_text} em x={treinamento_x}, y={treinamento_y}")
+
+            # 🔹 Parte 3: Carga horária (posição personalizada)
+            if carga_horaria:
+                carga_x = 600  # ➡️ Altere conforme o template
+                carga_y = 1380  # ➡️ Altere conforme o template
+                carga_text = f"Carga horária: {carga_horaria}h"
+                draw.text((carga_x, carga_y), carga_text, font=font_info, fill="black")
+                logger.info(f"📝 Carga horária desenhada: {carga_text} em x={carga_x}, y={carga_y}")
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao desenhar informações adicionais: {e}")
+            return None
+
+        logger.info(f"🎉 Certificado montado com sucesso para {nome}!")
+        return certificate
+
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado ao montar certificado: {e}")
         return None
-    
-    signature = Image.open(SIGNATURE_PATH).convert("RGBA")
-    clear_output_folder()
-    
-    date = get_current_date()
-    unique_hash = str(uuid.uuid4())[:16]  # Gerar hash aleatória de 12 caracteres
 
-    # Gera o QR com a URL dinâmica
-    qr_img = gerar_qr_code(unique_hash, base_url)
 
-    certificate = template.copy()
-    draw = ImageDraw.Draw(certificate)
-    
-    
-    # Adicionar Nome no certificado    
-    font = ImageFont.truetype(FONT_PATH, 60)
-    draw.text((1050, 700), name, font=font, fill="black")
 
-    # Adicionar data no certificado
-    font_date = ImageFont.truetype(FONT_PATH, 40)
-    draw.text((600, 1100), date, font=font_date, fill="black")
+def generate_certificate_for_student(
+    name,
+    base_url,
+    nome_turma=None,
+    data_evento=None,
+    nome_treinamento=None,
+    carga_horaria=None
+):
+    try:
+        logger.info(f"🚀 Iniciando geração de certificado para estudante: {name}")
 
-    # Adicionar assinatura no certificado
-    signature_resized = signature.resize((300, 100))  # Ajustar tamanho conforme necessário
-    certificate.paste(signature_resized, (1500, 1050), signature_resized)  # Ajustar posição conforme necessário
+        # Tenta abrir o template
+        try:
+            template = Image.open(TEMPLATE_PATH)
+            logger.info(f"✅ Template carregado: {TEMPLATE_PATH}")
+        except FileNotFoundError:
+            logger.error(f"❌ Template não encontrado em {TEMPLATE_PATH}")
+            return None
 
-    # Adicionar hash pequena no canto inferior
-    font_hash = ImageFont.truetype(FONT_PATH, 10)
-    draw.text((50, 1400), f"ID: {unique_hash}", font=font_hash, fill="black")
+        # Tenta abrir a assinatura
+        try:
+            signature = Image.open(SIGNATURE_PATH).convert("RGBA")
+            logger.info(f"✅ Assinatura carregada: {SIGNATURE_PATH}")
+        except FileNotFoundError:
+            logger.error(f"❌ Assinatura não encontrada em {SIGNATURE_PATH}")
+            return None
 
-    # Redimensiona para um tamanho discreto
-    qr_size = 150  # Tamanho em pixels (ajuste conforme o layout)
-    qr_resized = qr_img.resize((qr_size, qr_size))
+        # Limpa a pasta de saída
+        clear_output_folder()
+        logger.info(f"🧹 Pasta {OUTPUT_FOLDER} limpa para novos certificados")
 
-    # Coordenadas para canto inferior direito
-    cert_width, cert_height = certificate.size
-    qr_x = cert_width - qr_size - 50  # 50px da borda direita
-    qr_y = cert_height - qr_size - 50  # 50px da borda inferior
+        # Define a data de emissão e gera o código único
+        date = get_current_date()
+        unique_hash = str(uuid.uuid4())[:16]
+        logger.info(f"📅 Data de emissão: {date} | 🔐 Código único gerado: {unique_hash}")
 
-    # Cola o QR Code no certificado
-    certificate.paste(qr_resized, (qr_x, qr_y))
+        # ✅ Garantir que todos os campos tenham valor (fallbacks)
+        if not nome_turma:
+            logger.warning(f"⚠️ Nome da turma não informado para {name}")
+            nome_turma = "Turma não especificada"
 
-    
-    output_file = os.path.join(OUTPUT_FOLDER, f"{name.replace(' ', '_')}_certificate.png")
-    certificate.save(output_file)
+        if not data_evento:
+            logger.warning(f"⚠️ Data do evento não informada para {name}")
+            data_evento = "Data não informada"
 
-    # Salvar no Firestore
-    save_certificate_to_firestore(name, date, unique_hash)
+        if not nome_treinamento:
+            logger.warning(f"⚠️ Nome do treinamento não informado para {name}")
+            nome_treinamento = "Treinamento não especificado"
 
-    return output_file, unique_hash
+        if not carga_horaria:
+            logger.warning(f"⚠️ Carga horária não informada para {name}")
+            carga_horaria = "Carga horária não informada"
+
+        # Monta o certificado com as novas informações
+        certificate = montar_certificado_imagem(
+            nome=name,
+            data_emissao=date,
+            codigo=unique_hash,
+            base_url=base_url,
+            turma_nome=nome_turma,
+            data_evento=data_evento,
+            nome_treinamento=nome_treinamento,
+            carga_horaria=carga_horaria
+        )
+
+        if not certificate:
+            logger.error(f"❌ Falha ao montar o certificado para {name}")
+            return None
+
+        # Salva o certificado como imagem
+        output_file = os.path.join(OUTPUT_FOLDER, f"{name.replace(' ', '_')}_certificate.png")
+        certificate.save(output_file)
+        logger.info(f"✅ Certificado salvo em {output_file}")
+
+        # Salva no Firestore com todos os dados
+        save_certificate_to_firestore(
+            nome=name,
+            data_emissao=date,
+            codigo=unique_hash,
+            turma_nome=nome_turma,
+            data_evento=data_evento,
+            nome_treinamento=nome_treinamento,
+            carga_horaria=carga_horaria
+        )
+        logger.info(f"✅ Dados do certificado salvos no Firestore para {name} (ID: {unique_hash})")
+
+        logger.info(f"🎉 Certificado gerado com sucesso para {name}")
+        return output_file, unique_hash
+
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado ao gerar certificado para {name}: {e}")
+        return None
+
+
+
 
 # Gerar modelo de CSV
 def generate_template_csv():
@@ -208,112 +478,170 @@ def generate_template_csv():
         f.write(template_csv)
     return template_path
 
-# Gerar certificados a partir de um CSV
-def generate_certificates(csv_path, base_url):
+def generate_certificates(csv_path, base_url, turma_id):
     try:
-        if not os.path.exists(csv_path):
-            return None
-        
-        template = Image.open(TEMPLATE_PATH)
-        signature = Image.open(SIGNATURE_PATH).convert("RGBA")
-        clear_output_folder()
+        logger.info(f"🚀 Iniciando geração de certificados em lote para a turma {turma_id}")
 
+        # ✅ Verifica se o CSV existe
+        if not os.path.exists(csv_path):
+            logger.error(f"❌ Arquivo CSV não encontrado: {csv_path}")
+            return None
+
+        # ✅ Busca dados da turma no Firestore
+        turma_ref = db.collection("turmas").document(turma_id)
+        turma_doc = turma_ref.get()
+
+        if not turma_doc.exists:
+            logger.error(f"❌ Turma com ID {turma_id} não encontrada no Firestore")
+            return None
+
+        turma_data = turma_doc.to_dict()
+
+        # ✅ Captura todos os dados relevantes da turma
+        nome_turma = turma_data.get("nome", "Turma sem nome")
+        data_evento = turma_data.get("data_evento", "Data do evento não informada")
+        nome_treinamento = turma_data.get("nome_treinamento", "Treinamento não especificado")
+        carga_horaria = turma_data.get("carga_horaria", "Carga horária não informada")
+
+        logger.info(f"✅ Turma encontrada: {nome_turma} | Data do evento: {data_evento} | Treinamento: {nome_treinamento} | Carga horária: {carga_horaria}")
+
+        # ✅ Limpa a pasta de saída
+        clear_output_folder()
+        logger.info(f"🧹 Pasta {OUTPUT_FOLDER} limpa para novos certificados")
+
+        # ✅ Processa o CSV
         with open(csv_path, newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
+
             if "name" not in reader.fieldnames:
+                logger.error("❌ CSV inválido. Coluna 'name' não encontrada!")
                 return None
 
+            # ✅ Processa cada linha do CSV
             for row in reader:
                 name = row["name"].strip()
+
                 if not name:
+                    logger.warning("⚠️ Nome vazio encontrado no CSV, pulando...")
                     continue
+
+                logger.info(f"📝 Gerando certificado para: {name}")
 
                 date = get_current_date()
                 unique_hash = str(uuid.uuid4())[:16]
 
-                certificate = template.copy()
-                draw = ImageDraw.Draw(certificate)
+                # ✅ Gera o certificado com as infos completas
+                certificate = montar_certificado_imagem(
+                    nome=name,
+                    data_emissao=date,
+                    codigo=unique_hash,
+                    base_url=base_url,
+                    turma_nome=nome_turma,
+                    data_evento=data_evento,
+                    nome_treinamento=nome_treinamento,
+                    carga_horaria=carga_horaria
+                )
 
-                # Nome
-                font = ImageFont.truetype(FONT_PATH, 60)
-                draw.text((1050, 700), name, font=font, fill="black")
+                if not certificate:
+                    logger.error(f"❌ Falha ao montar certificado para {name}, continuando para o próximo...")
+                    continue
 
-                # Data
-                font_date = ImageFont.truetype(FONT_PATH, 40)
-                draw.text((600, 1100), date, font=font_date, fill="black")
-
-                # Assinatura
-                signature_resized = signature.resize((300, 100))
-                certificate.paste(signature_resized, (1500, 1050), signature_resized)
-
-                # Hash/código
-                font_hash = ImageFont.truetype(FONT_PATH, 10)
-                draw.text((50, 1400), f"ID: {unique_hash}", font=font_hash, fill="black")
-
-                # 👉 QR Code no canto inferior direito
-                qr_img = gerar_qr_code(unique_hash, base_url)
-                qr_size = 150  # mesmo tamanho do avulso
-                qr_resized = qr_img.resize((qr_size, qr_size))
-
-                cert_width, cert_height = certificate.size
-                qr_x = cert_width - qr_size - 50
-                qr_y = cert_height - qr_size - 50
-
-                certificate.paste(qr_resized, (qr_x, qr_y))
-
-                # Salvar o certificado
+                # ✅ Salva o certificado na pasta de saída
                 output_file = os.path.join(OUTPUT_FOLDER, f"{name.replace(' ', '_')}_certificate.png")
                 certificate.save(output_file)
+                logger.info(f"✅ Certificado salvo: {output_file}")
 
-                # Salvar dados no Firestore
-                save_certificate_to_firestore(name, date, unique_hash)
+                # ✅ Salva dados no Firestore com todas as informações
+                save_certificate_to_firestore(
+                    nome=name,
+                    data_emissao=date,
+                    codigo=unique_hash,
+                    turma_nome=nome_turma,
+                    data_evento=data_evento,
+                    nome_treinamento=nome_treinamento,
+                    carga_horaria=carga_horaria
+                )
 
-        # Compactar todos em um zip
+        # ✅ Compacta tudo em um arquivo ZIP
         zip_filename = "certificates.zip"
         zip_path = os.path.join(OUTPUT_FOLDER, zip_filename)
+
         with zipfile.ZipFile(zip_path, 'w') as zipf:
             for file in os.listdir(OUTPUT_FOLDER):
                 if file.endswith(".png"):
                     zipf.write(os.path.join(OUTPUT_FOLDER, file), file)
 
+        logger.info(f"✅ Certificados em lote gerados e compactados com sucesso: {zip_path}")
+
         return zip_path
 
     except Exception as e:
-        print(f"Erro ao gerar certificados em lote: {e}")
+        logger.error(f"❌ Erro ao gerar certificados em lote: {e}")
         return None
+
 
 @app.route('/')
 def index():
-    return '''
-    <html>
+    base_url = get_secure_base_url()
+
+    return f'''
+    <!DOCTYPE html>
+    <html lang="pt-BR">
     <head>
+        <meta charset="UTF-8">
         <title>Gerador de Certificados</title>
-        <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
     </head>
     <body>
-        <h1>Bem-vindo ao Gerador de Certificados</h1>
-        <ul>
-            <li><a href="/aluno">Emitir Certificado Individual</a></li>
-            <li><a href="/lote">Emitir Certificados em Lote (CSV)</a></li>
-            <li><a href="/validar">Validar Certificado</a></li>
-            <li><a href="/listagem">Validar Certificado</a></li>
-        </ul>
+        <div class="container">
+            <h1>🎓 Bem-vindo ao Gerador de Certificados</h1>
+
+            <div class="button-container">
+                <a href="/aluno" class="btn">🧑‍🎓 Emitir Certificado Individual</a>
+                <a href="/lote" class="btn">📂 Emitir Certificados em Lote (CSV)</a>
+                <a href="/turmas" class="btn">📋 Gerenciar Turmas</a>
+                <a href="/validar" class="btn">🔎 Validar Certificado</a>
+                <a href="/listagem" class="btn">📜 Listagem de Certificados</a>
+            </div>
+
+            <footer>
+                <p>&copy; {datetime.now().year} EquilibriON | Gerador de Certificados</p>
+            </footer>
+        </div>
     </body>
     </html>
     '''
 
+
 @app.route('/lote')
 def lote():
+    base_url = get_secure_base_url()
     current_date = get_current_date()
+
     return f'''
-    <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
-    <h1>Gerador de Certificados</h1>
-    <p>Data que será impressa nos certificados: <strong>{current_date}</strong></p>
-    <p><a href="/download_template">Baixar modelo de CSV</a></p>
-    <form action="/upload" method="post" enctype="multipart/form-data">
-        <input type="file" name="file" accept=".csv" required>
-        <button type="submit">Enviar</button>
-    </form>
+    <html>
+    <head>
+        <title>Gerar Certificados em Lote</title>
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
+    </head>
+    <body>
+        <h1>Gerador de Certificados em Lote</h1>
+
+        <p><strong>Data que será impressa nos certificados individuais:</strong> {current_date}</p>
+        
+        <p><a href="/download_template">⬇️ Baixar modelo de CSV</a></p>
+
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <label for="file">Selecione o arquivo CSV:</label><br>
+            <input type="file" name="file" accept=".csv" required><br><br>
+
+            <label for="turma_id">Digite o código da turma:</label><br>
+            <input type="text" name="turma_id" required><br><br>
+
+            <button type="submit">Gerar Certificados em Lote</button>
+        </form>
+    </body>
+    </html>
     '''
 
 @app.route('/download_template')
@@ -323,48 +651,77 @@ def download_template():
 
 @app.route('/aluno', methods=['GET', 'POST'])
 def aluno():
-
-    scheme = request.headers.get('X-Forwarded-Proto', 'https')
-    host = request.headers.get('Host')
-    base_url = f"{scheme}://{host}"
-
+    base_url = get_secure_base_url()
 
     if request.method == 'POST':
         name = request.form.get('name')
+        turma_id = request.form.get('turma_id')
+
+        # ✅ Validações básicas
         if not name:
             return "Erro: Nome não pode estar vazio."
+        if not turma_id:
+            return "Erro: Código da turma não pode estar vazio."
 
-        base_url = request.host_url.rstrip('/')
+        # ✅ Busca os dados da turma no Firestore
+        try:
+            turma_ref = db.collection("turmas").document(turma_id)
+            turma_doc = turma_ref.get()
+
+            if not turma_doc.exists:
+                return f"Erro: Turma com código {turma_id} não encontrada."
+
+            turma_data = turma_doc.to_dict()
+            nome_turma = turma_data.get("nome", "Turma sem nome")
+            data_evento = turma_data.get("data_evento", "Data do evento não informada")
+            nome_treinamento = turma_data.get("nome_treinamento", "Treinamento não especificado")
+            carga_horaria = turma_data.get("carga_horaria", "Carga horária não informada")
+
+            logger.info(f"✅ Turma encontrada: {nome_turma} - {data_evento}")
+            logger.info(f"🔎 Turma Info | Nome: {nome_turma}, Data Evento: {data_evento}, Treinamento: {nome_treinamento}, Carga Horária: {carga_horaria}")
+
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar turma {turma_id}: {e}")
+            return "Erro ao buscar informações da turma."
 
         # ✅ Chama e captura o caminho e o código único corretamente!
-        result = generate_certificate_for_student(name, base_url)
+        logger.info(f"🚀 Gerando certificado para {name} na turma {nome_turma} ({turma_id})")
+
+        result = generate_certificate_for_student(
+            name,
+            base_url,
+            nome_turma=nome_turma,
+            data_evento=data_evento,
+            nome_treinamento=nome_treinamento,
+            carga_horaria=carga_horaria
+        )
 
         # ✅ Se não veio nada, erro!
         if not result:
+            logger.error(f"❌ Erro ao gerar o certificado para {name}")
             return "Erro ao gerar o certificado."
 
         certificate_path, unique_hash = result
 
         # ✅ Se o código veio vazio, erro!
         if not unique_hash:
+            logger.error(f"❌ Código único vazio após geração de certificado para {name}")
             return "Erro ao gerar o código do certificado."
 
         # ✅ Monta o link de validação e compartilhamento com o código correto!
         validar_url = f"{base_url}/validar?codigo={unique_hash}"
-        validar_url_encoded = quote_plus(validar_url)  # 🔥 encodando!
-        linkedin_share_url = f"https://www.linkedin.com/sharing/share-offsite/?url={validar_url_encoded}"
-
+        linkedin_share_url = f"https://www.linkedin.com/sharing/share-offsite/?url={base_url}/conquista/{unique_hash}"
 
         # 🔎 LOGS PARA DEBUG!
-        print("DEBUG INFO:")
-        print(f"Base URL: {base_url}")
-        print(f"Unique Hash: {unique_hash}")
-        print(f"Cert Path: {certificate_path}")
-        print(f"Validar URL: {validar_url}")
-        print(f"LinkedIn URL: {linkedin_share_url}")
+        logger.info("DEBUG INFO:")
+        logger.info(f"Base URL: {base_url}")
+        logger.info(f"Unique Hash: {unique_hash}")
+        logger.info(f"Cert Path: {certificate_path}")
+        logger.info(f"Validar URL: {validar_url}")
+        logger.info(f"LinkedIn URL: {linkedin_share_url}")
 
         # ✅ Gera o Base64 da imagem para exibir na tela
-        import base64
         with open(certificate_path, "rb") as image_file:
             img_base64 = base64.b64encode(image_file.read()).decode('utf-8')
 
@@ -373,7 +730,7 @@ def aluno():
         <html>
         <head>
             <title>Certificado Gerado</title>
-            <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+            <link rel="stylesheet" href="{base_url}/static/styles.css">
             <style>
                 .cert-image {{
                     max-width: 600px;
@@ -412,43 +769,75 @@ def aluno():
         </html>
         '''
 
-    # Se for GET
-    base_url = request.host_url.rstrip('/')
+    # 🔵 Se for GET (fora do POST)
     return f'''
-    <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
-    <h1>Emitir Certificado</h1>
-    <form action="/aluno" method="post">
-        <label for="name">Digite seu nome:</label>
-        <input type="text" name="name" required>
-        <button type="submit">Gerar Certificado</button>
-    </form>
-    '''
+    <html>
+    <head>
+        <title>Emitir Certificado</title>
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
+    </head>
+    <body>
+        <h1>Emitir Certificado</h1>
+        <form action="/aluno" method="post">
+            <label for="name">Digite seu nome:</label><br>
+            <input type="text" name="name" required><br><br>
 
+            <label for="turma_id">Digite o código da turma:</label><br>
+            <input type="text" name="turma_id" required><br><br>
+
+            <button type="submit">Gerar Certificado</button>
+        </form>
+    </body>
+    </html>
+    '''
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    if 'file' not in request.files:
-        return "Erro: Nenhum arquivo enviado."
-    file = request.files['file']
-    if file.filename == '':
-        return "Erro: Nenhum arquivo selecionado."
+    base_url = get_secure_base_url()
 
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(file_path)
+    # ✅ Pega o arquivo e o código da turma
+    uploaded_file = request.files.get('file')
+    turma_id = request.form.get('turma_id')
 
-    # ✅ Captura o host dinamicamente
-    base_url = request.host_url.rstrip('/')  # Exemplo: https://certificate-generator.run.app
+    if not uploaded_file or not turma_id:
+        logger.error("❌ CSV ou ID da turma não fornecido!")
+        return "❌ Arquivo CSV e código da turma são obrigatórios!", 400
 
-    # ✅ Agora passando os dois argumentos!
-    zip_path = generate_certificates(file_path, base_url)
+    logger.info(f"📥 Recebido arquivo CSV '{uploaded_file.filename}' para a turma {turma_id}")
 
-    if not zip_path:
-        return "Erro ao gerar os certificados. Verifique o arquivo CSV."
+    # ✅ Valida o tipo do arquivo (só pra garantir)
+    if not uploaded_file.filename.endswith('.csv'):
+        logger.error(f"❌ O arquivo '{uploaded_file.filename}' não é um CSV válido!")
+        return "❌ Apenas arquivos CSV são aceitos!", 400
 
-    return '''
-    <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
-    <h1>Certificados gerados!</h1><p><a href='/download_zip'>Clique aqui para baixar</a></p>
-    '''
+    try:
+        # ✅ Salva temporariamente o arquivo no servidor
+        file_path = os.path.join(UPLOAD_FOLDER, uploaded_file.filename)
+        uploaded_file.save(file_path)
+
+        logger.info(f"✅ Arquivo CSV salvo temporariamente em {file_path}")
+
+        # ✅ Gera os certificados em lote (com a turma)
+        zip_path = generate_certificates(file_path, base_url, turma_id)
+
+        if not zip_path:
+            logger.error("❌ Erro durante a geração dos certificados em lote.")
+            return "❌ Erro ao gerar os certificados em lote.", 500
+
+        logger.info(f"✅ Certificados em lote gerados e compactados! ZIP pronto para download: {zip_path}")
+
+        # ✅ Envia o ZIP para download
+        return send_file(
+            zip_path,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='certificados_lote.zip'
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado durante upload e geração de certificados: {e}")
+        return "❌ Ocorreu um erro interno ao processar o upload e gerar os certificados.", 500
+
 
 @app.route('/test_firestore', methods=['GET'])
 def test_firestore():
@@ -476,8 +865,12 @@ def test_firestore():
 @app.route('/validar', methods=['GET', 'POST'])
 def validar_certificado():
     global db
+
     if db is None:
+        logger.error("❌ Firestore não inicializado!")
         return "❌ Firestore não inicializado!", 500
+
+    base_url = get_secure_base_url()
 
     codigo = None
 
@@ -491,11 +884,11 @@ def validar_certificado():
 
     # Se ainda não tem código, exibe o formulário
     if not codigo:
-        return '''
+        return f'''
         <html>
         <head>
             <title>Validação de Certificado</title>
-            <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+            <link rel="stylesheet" href="{base_url}/static/styles.css">
         </head>
         <body>
             <h1>🔎 Validar Certificado</h1>
@@ -512,18 +905,19 @@ def validar_certificado():
 
     # Agora tem código, vamos validar
     try:
-        print(f"🔍 Validando certificado com ID: {codigo}")
+        logger.info(f"🔍 Validando certificado com ID: {codigo}")
 
+        # 1️⃣ Busca o documento no Firestore
         doc_ref = db.collection("certificados").document(codigo)
         doc = doc_ref.get()
 
         if not doc.exists:
-            print("❌ Documento não encontrado no Firestore.")
-            return '''
+            logger.warning(f"❌ Documento não encontrado para o código: {codigo}")
+            return f'''
             <html>
             <head>
                 <title>Certificado Não Encontrado</title>
-                <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+                <link rel="stylesheet" href="{base_url}/static/styles.css">
             </head>
             <body>
                 <h1>❌ Certificado não encontrado!</h1>
@@ -533,38 +927,32 @@ def validar_certificado():
             </html>
             ''', 404
 
-        # Recuperar dados
+        # 2️⃣ Recupera os dados
         data = doc.to_dict()
         nome = data.get('nome')
         data_emissao = data.get('data_emissao')
 
-        print(f"✅ Certificado válido para {nome} - {data_emissao}")
+        # ⚠️ Dados adicionais
+        turma_nome = data.get('turma_nome', 'Turma não informada')
+        data_evento = data.get('data_evento', 'Data do evento não informada')
+        nome_treinamento = data.get('nome_treinamento', 'Treinamento não especificado')
+        carga_horaria = data.get('carga_horaria', 'Carga horária não informada')
 
-        # Gerar certificado para exibir
+        logger.info(f"✅ Certificado válido! Nome: {nome}, Turma: {turma_nome}, Evento: {data_evento}, Treinamento: {nome_treinamento}, Carga Horária: {carga_horaria}, Data emissão: {data_emissao}")
+
+        # 3️⃣ Gerar certificado para exibir
         try:
-            template = Image.open(TEMPLATE_PATH)
-            signature = Image.open(SIGNATURE_PATH).convert("RGBA")
+            certificate = montar_certificado_imagem(
+                nome=nome,
+                data_emissao=data_emissao,
+                codigo=codigo,
+                base_url=base_url,
+                turma_nome=turma_nome,
+                data_evento=data_evento,
+                nome_treinamento=nome_treinamento,
+                carga_horaria=carga_horaria
+            )
 
-            certificate = template.copy()
-            draw = ImageDraw.Draw(certificate)
-
-            # Nome
-            font = ImageFont.truetype(FONT_PATH, 60)
-            draw.text((1050, 700), nome, font=font, fill="black")
-
-            # Data de emissão
-            font_date = ImageFont.truetype(FONT_PATH, 40)
-            draw.text((600, 1100), data_emissao, font=font_date, fill="black")
-
-            # Assinatura
-            signature_resized = signature.resize((300, 100))
-            certificate.paste(signature_resized, (1500, 1050), signature_resized)
-
-            # Código
-            font_hash = ImageFont.truetype(FONT_PATH, 10)
-            draw.text((50, 1400), f"ID: {codigo}", font=font_hash, fill="black")
-
-            # Base64 para exibir inline
             img_io = io.BytesIO()
             certificate.save(img_io, 'PNG')
             img_io.seek(0)
@@ -573,15 +961,15 @@ def validar_certificado():
             img_base64 = base64.b64encode(img_io.getvalue()).decode('utf-8')
 
         except Exception as e:
-            print(f"❌ Erro ao gerar imagem do certificado: {e}")
+            logger.error(f"❌ Erro ao gerar imagem do certificado para visualização: {e}")
             img_base64 = None
 
-        # HTML com a resposta e CSS EXTERNO
+        # 4️⃣ Retorna a página HTML com o resultado
         return f'''
         <html>
         <head>
             <title>Validação de Certificado</title>
-            <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+            <link rel="stylesheet" href="{base_url}/static/styles.css">
             <style>
                 .cert-image {{
                     max-width: 600px;
@@ -601,23 +989,29 @@ def validar_certificado():
             <div>
                 <p><strong>Nome:</strong> {nome}</p>
                 <p><strong>Data de Emissão:</strong> {data_emissao}</p>
+                <p><strong>Turma:</strong> {turma_nome}</p>
+                <p><strong>Data do Evento:</strong> {data_evento}</p>
+                <p><strong>Treinamento:</strong> {nome_treinamento}</p>
+                <p><strong>Carga Horária:</strong> {carga_horaria}</p>
                 <p><strong>ID de Validação:</strong> {codigo}</p>
             </div>
 
             {'<img class="cert-image" src="data:image/png;base64,' + img_base64 + '">' if img_base64 else '<p>Erro ao carregar a imagem do certificado.</p>'}
 
-            <a class="back-link" href="/validar">🔙 Validar outro certificado</a>
+            <div style="margin-top: 30px;">
+                <a class="back-link" href="/validar">🔙 Validar outro certificado</a>
+            </div>
         </body>
         </html>
         '''
 
     except Exception as e:
-        print(f"❌ Erro inesperado na validação: {e}")
-        return '''
+        logger.error(f"❌ Erro inesperado na validação: {e}")
+        return f'''
         <html>
         <head>
             <title>Erro na Validação</title>
-            <link rel="stylesheet" href="https://certificate-generator-194178149694.us-central1.run.app/static/styles.css">
+            <link rel="stylesheet" href="{base_url}/static/styles.css">
         </head>
         <body>
             <h1>❌ Erro ao validar certificado!</h1>
@@ -649,41 +1043,12 @@ def mostrar_certificado(codigo):
 
         print(f"✅ Documento encontrado: Nome={nome}, Data={data_emissao}")
 
-        # 2. Carregar template
-        try:
-            template = Image.open(TEMPLATE_PATH)
-            print(f"✅ Template carregado: {TEMPLATE_PATH}")
-        except Exception as e:
-            print(f"❌ Erro ao carregar o template: {e}")
-            return "❌ Erro ao carregar o template!", 500
+        base_url = get_secure_base_url()
+        certificate = montar_certificado_imagem(nome, data_emissao, codigo, base_url)
 
-        # 3. Carregar assinatura
-        try:
-            signature = Image.open(SIGNATURE_PATH).convert("RGBA")
-            print(f"✅ Assinatura carregada: {SIGNATURE_PATH}")
-        except Exception as e:
-            print(f"❌ Erro ao carregar a assinatura: {e}")
-            return "❌ Erro ao carregar a assinatura!", 500
-
-        # 4. Montar o certificado
-        certificate = template.copy()
-        draw = ImageDraw.Draw(certificate)
-
-        # Nome
-        font = ImageFont.truetype(FONT_PATH, 60)
-        draw.text((1050, 700), nome, font=font, fill="black")
-
-        # Data de emissão
-        font_date = ImageFont.truetype(FONT_PATH, 40)
-        draw.text((600, 1100), data_emissao, font=font_date, fill="black")
-
-        # Assinatura
-        signature_resized = signature.resize((300, 100))
-        certificate.paste(signature_resized, (1500, 1050), signature_resized)
-
-        # Hash/código
-        font_hash = ImageFont.truetype(FONT_PATH, 10)
-        draw.text((50, 1400), f"ID: {codigo}", font=font_hash, fill="black")
+        if not certificate:
+            print("❌ Erro ao montar o certificado.")
+            return "❌ Erro ao montar o certificado.", 500
 
         # 5. Salvar a imagem no buffer e retornar
         img_io = io.BytesIO()
@@ -709,67 +1074,73 @@ def download_certificado(codigo):
     global db
 
     try:
-        print(f"🔍 Download do certificado com ID: {codigo}")
+        logger.info(f"🔍 Iniciando download do certificado com ID: {codigo}")
 
+        # 1️⃣ Verifica se o Firestore está inicializado
+        if db is None:
+            logger.error("❌ Firestore não inicializado!")
+            return "❌ Erro interno: Firestore não inicializado!", 500
+
+        # 2️⃣ Busca o certificado no Firestore pelo código único
         doc_ref = db.collection("certificados").document(codigo)
         doc = doc_ref.get()
 
         if not doc.exists:
-            print("❌ Certificado não encontrado para download!")
+            logger.warning(f"❌ Certificado com ID {codigo} não encontrado para download!")
             return "❌ Certificado não encontrado!", 404
 
+        # 3️⃣ Recupera os dados básicos + novos campos
         data = doc.to_dict()
         nome = data.get('nome')
         data_emissao = data.get('data_emissao')
 
-        # Gera novamente a imagem do certificado
-        template = Image.open(TEMPLATE_PATH)
-        signature = Image.open(SIGNATURE_PATH).convert("RGBA")
+        turma_nome = data.get('turma_nome', 'Turma não informada')
+        data_evento = data.get('data_evento', 'Data do evento não informada')
+        nome_treinamento = data.get('nome_treinamento', 'Treinamento não especificado')
+        carga_horaria = data.get('carga_horaria', 'Carga horária não informada')
 
-        certificate = template.copy()
-        draw = ImageDraw.Draw(certificate)
+        logger.info(f"✅ Dados do certificado recuperados: Nome={nome}, Data Emissão={data_emissao}, Turma={turma_nome}, Evento={data_evento}, Treinamento={nome_treinamento}, Carga Horária={carga_horaria}")
 
-        # Nome
-        font = ImageFont.truetype(FONT_PATH, 60)
-        draw.text((1050, 700), nome, font=font, fill="black")
+        # 4️⃣ Gera a base URL para o QR Code
+        base_url = get_secure_base_url()
 
-        # Data de emissão
-        font_date = ImageFont.truetype(FONT_PATH, 40)
-        draw.text((600, 1100), data_emissao, font=font_date, fill="black")
+        # 5️⃣ Monta novamente o certificado com TODAS as informações
+        certificate = montar_certificado_imagem(
+            nome=nome,
+            data_emissao=data_emissao,
+            codigo=codigo,
+            base_url=base_url,
+            turma_nome=turma_nome,
+            data_evento=data_evento,
+            nome_treinamento=nome_treinamento,
+            carga_horaria=carga_horaria
+        )
 
-        # Assinatura
-        signature_resized = signature.resize((300, 100))
-        certificate.paste(signature_resized, (1500, 1050), signature_resized)
+        if not certificate:
+            logger.error("❌ Falha ao montar o certificado para download!")
+            return "❌ Erro ao gerar o certificado!", 500
 
-        # Código/Hash
-        font_hash = ImageFont.truetype(FONT_PATH, 10)
-        draw.text((50, 1400), f"ID: {codigo}", font=font_hash, fill="black")
-
-        # QR Code
-        base_url = request.host_url
-        qr_img = gerar_qr_code(codigo, base_url)
-
-        qr_size = 150
-        qr_resized = qr_img.resize((qr_size, qr_size))
-
-        cert_width, cert_height = certificate.size
-        qr_x = cert_width - qr_size - 50
-        qr_y = cert_height - qr_size - 50
-        certificate.paste(qr_resized, (qr_x, qr_y))
-
-        # Salvar no buffer e retornar
+        # 6️⃣ Salva o certificado em memória (buffer)
         img_io = io.BytesIO()
         certificate.save(img_io, 'PNG')
         img_io.seek(0)
 
+        # 7️⃣ Prepara o nome do arquivo
         filename = f"{nome.replace(' ', '_')}_certificado.png"
+        logger.info(f"✅ Certificado pronto para download: {filename}")
 
-        print(f"✅ Download do certificado pronto: {filename}")
-        return send_file(img_io, mimetype='image/png', as_attachment=True, download_name=filename)
+        # 8️⃣ Retorna o arquivo para o usuário
+        return send_file(
+            img_io,
+            mimetype='image/png',
+            as_attachment=True,
+            download_name=filename
+        )
 
     except Exception as e:
-        print(f"❌ Erro ao preparar download: {e}")
+        logger.error(f"❌ Erro ao preparar download do certificado {codigo}: {e}")
         return "❌ Erro ao preparar o certificado para download!", 500
+
 
 @app.route('/favicon.ico')
 def favicon():
@@ -802,9 +1173,7 @@ def listar_certificados():
         certificados.sort(key=lambda x: x['nome'])
 
         # Monta o base_url seguro
-        scheme = request.headers.get('X-Forwarded-Proto', 'https')
-        host = request.headers.get('Host')
-        base_url = f"{scheme}://{host}"
+        base_url = get_secure_base_url()
 
         # Cria o HTML
         table_rows = ""
@@ -878,27 +1247,34 @@ def criar_turma():
     if db is None:
         return "❌ Firestore não inicializado!", 500
 
-    base_url = request.host_url.rstrip('/')
+    base_url = get_secure_base_url()
 
     if request.method == 'POST':
         nome = request.form.get('nome')
         data_evento = request.form.get('data_evento')
+        nome_cliente = request.form.get('nome_cliente')
+        nome_treinamento = request.form.get('nome_treinamento')
+        carga_horaria = request.form.get('carga_horaria')
 
-        if not nome or not data_evento:
-            return "❌ Nome e Data do Evento são obrigatórios."
+        # ✅ Valida se os campos obrigatórios estão preenchidos
+        if not nome or not data_evento or not nome_cliente or not nome_treinamento or not carga_horaria:
+            return "❌ Todos os campos são obrigatórios: Nome da Turma, Data do Evento, Nome do Cliente, Nome do Treinamento e Carga Horária."
 
         try:
             turma_id = str(uuid.uuid4())[:16]  # ID único da turma
 
-            # Salva no Firestore na coleção "turmas"
+            # ✅ Salva no Firestore na coleção "turmas"
             doc_ref = db.collection("turmas").document(turma_id)
             doc_ref.set({
                 "id": turma_id,
                 "nome": nome,
-                "data_evento": data_evento
+                "data_evento": data_evento,
+                "nome_cliente": nome_cliente,
+                "nome_treinamento": nome_treinamento,
+                "carga_horaria": carga_horaria
             })
 
-            print(f"✅ Turma criada: {nome} - {data_evento} (ID: {turma_id})")
+            print(f"✅ Turma criada: {nome} - {data_evento} (ID: {turma_id}) | Carga horária: {carga_horaria}")
 
             return f'''
             <html>
@@ -910,7 +1286,11 @@ def criar_turma():
                 <h1>✅ Turma Criada com Sucesso!</h1>
                 <p><strong>Nome da Turma:</strong> {nome}</p>
                 <p><strong>Data do Evento:</strong> {data_evento}</p>
+                <p><strong>Cliente:</strong> {nome_cliente}</p>
+                <p><strong>Treinamento:</strong> {nome_treinamento}</p>
+                <p><strong>Carga Horária:</strong> {carga_horaria} horas</p>
                 <p><strong>ID da Turma:</strong> {turma_id}</p>
+                <br>
                 <a href="/turmas/criar">➕ Criar Nova Turma</a><br>
                 <a href="/turmas">📋 Ver Turmas Criadas</a><br>
                 <a href="/">🔙 Voltar ao Início</a>
@@ -922,7 +1302,7 @@ def criar_turma():
             print(f"❌ Erro ao criar turma: {e}")
             return f"❌ Erro ao criar turma: {e}", 500
 
-    # Se for GET, exibe o formulário
+    # Se for GET, exibe o formulário com o novo campo de carga horária
     return f'''
     <html>
     <head>
@@ -938,6 +1318,15 @@ def criar_turma():
             <label for="data_evento">Data do Evento:</label><br>
             <input type="date" id="data_evento" name="data_evento" required><br><br>
 
+            <label for="nome_cliente">Nome do Cliente:</label><br>
+            <input type="text" id="nome_cliente" name="nome_cliente" required><br><br>
+
+            <label for="nome_treinamento">Nome do Treinamento:</label><br>
+            <input type="text" id="nome_treinamento" name="nome_treinamento" required><br><br>
+
+            <label for="carga_horaria">Carga Horária (horas):</label><br>
+            <input type="number" id="carga_horaria" name="carga_horaria" min="1" required><br><br>
+
             <button type="submit">Criar Turma</button>
         </form>
         <br>
@@ -945,7 +1334,6 @@ def criar_turma():
     </body>
     </html>
     '''
-
 
 @app.route('/turmas')
 def listar_turmas():
@@ -963,14 +1351,18 @@ def listar_turmas():
             turmas.append({
                 "id": data.get('id'),
                 "nome": data.get('nome'),
-                "data_evento": data.get('data_evento')
+                "data_evento": data.get('data_evento'),
+                "nome_cliente": data.get('nome_cliente'),
+                "nome_treinamento": data.get('nome_treinamento'),
+                "carga_horaria": data.get('carga_horaria', 'Não informado')  # ✅ Campo novo
             })
 
         # Ordena pelo nome da turma (opcional)
         turmas.sort(key=lambda x: x['nome'])
 
-        base_url = request.host_url.rstrip('/')
+        base_url = get_secure_base_url()
 
+        # Monta as linhas da tabela
         table_rows = ""
         for turma in turmas:
             table_rows += f"""
@@ -978,6 +1370,9 @@ def listar_turmas():
                     <td>{turma['id']}</td>
                     <td>{turma['nome']}</td>
                     <td>{turma['data_evento']}</td>
+                    <td>{turma['nome_cliente']}</td>
+                    <td>{turma['nome_treinamento']}</td>
+                    <td>{turma['carga_horaria']} horas</td>
                 </tr>
             """
 
@@ -1008,18 +1403,21 @@ def listar_turmas():
             </style>
         </head>
         <body>
-            <h1>📋 Lista de Turmas</h1>
+            <h1>📋 Lista de Turmas Cadastradas</h1>
             <table>
                 <tr>
                     <th>ID da Turma</th>
                     <th>Nome da Turma</th>
                     <th>Data do Evento</th>
+                    <th>Cliente</th>
+                    <th>Treinamento</th>
+                    <th>Carga Horária</th> <!-- ✅ Nova coluna -->
                 </tr>
                 {table_rows}
             </table>
             <br>
-            <a href="/turmas/criar">➕ Criar Nova Turma</a><br>
-            <a href="/">🔙 Voltar ao Início</a>
+            <a class="back-link" href="/turmas/criar">➕ Criar Nova Turma</a><br>
+            <a class="back-link" href="/">🔙 Voltar ao Início</a>
         </body>
         </html>
         '''
@@ -1027,6 +1425,134 @@ def listar_turmas():
     except Exception as e:
         print(f"❌ Erro ao listar turmas: {e}")
         return f"❌ Erro ao listar turmas: {e}", 500
+
+
+@app.route('/conquista/<codigo>')
+def conquista(codigo):
+    global db
+
+    logger.info(f"🔍 Acessando página de conquista do certificado {codigo}")
+
+    # 1️⃣ Busca o certificado no Firestore
+    doc_ref = db.collection("certificados").document(codigo)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        logger.warning(f"❌ Certificado não encontrado: {codigo}")
+        return "❌ Certificado não encontrado!", 404
+
+    # 2️⃣ Recupera todos os dados necessários
+    data = doc.to_dict()
+
+    nome = data.get('nome')
+    data_emissao = data.get('data_emissao')
+    turma_nome = data.get('turma_nome', "Turma não especificada")
+    data_evento = data.get('data_evento', "Data do evento não informada")
+    nome_treinamento = data.get('nome_treinamento', "Treinamento não especificado")
+    carga_horaria = data.get('carga_horaria', "Carga horária não informada")
+
+    logger.info(f"✅ Dados do certificado recuperados para a conquista:")
+    logger.info(f"Nome: {nome} | Emissão: {data_emissao} | Turma: {turma_nome} | Evento: {data_evento} | Treinamento: {nome_treinamento} | Carga horária: {carga_horaria}")
+
+    # 3️⃣ Informações para o Open Graph (LinkedIn e redes)
+    base_url = get_secure_base_url()
+
+    image_url = f"{base_url}/download_cert/{codigo}"
+
+    # 4️⃣ Título e descrição para redes sociais com mais informações
+    titulo = f"{nome} conquistou seu certificado no treinamento {nome_treinamento}!"
+    descricao = (
+        f"Participou da turma '{turma_nome}', no evento de {data_evento}, com carga horária de {carga_horaria}h. "
+        f"Recebeu seu certificado em {data_emissao}. Confira!"
+    )
+
+    # 5️⃣ Página HTML com Open Graph + exibição de informações detalhadas
+    return f'''
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <title>{titulo}</title>
+
+        <!-- Link para o CSS existente -->
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
+
+        <!-- Open Graph Tags -->
+        <meta property="og:title" content="{titulo}" />
+        <meta property="og:description" content="{descricao}" />
+        <meta property="og:image" content="{image_url}" />
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content="{base_url}/conquista/{codigo}" />
+
+        <!-- SEO -->
+        <meta name="description" content="{descricao}">
+        <meta name="robots" content="index, follow">
+
+        <!-- Cache-control para debug -->
+        <meta http-equiv="cache-control" content="no-cache" />
+        <meta http-equiv="pragma" content="no-cache" />
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎉 {titulo}</h1>
+            <p>{descricao}</p>
+
+            <img src="{image_url}" alt="Certificado de {nome}" style="width:100%; max-width:600px; margin: 20px auto; border-radius: 10px;">
+
+            <div class="details-section" style="margin-top: 30px;">
+                <h2>📄 Detalhes do Certificado</h2>
+                <ul style="list-style-type:none;">
+                    <li><strong>Nome do Participante:</strong> {nome}</li>
+                    <li><strong>Treinamento:</strong> {nome_treinamento}</li>
+                    <li><strong>Turma:</strong> {turma_nome}</li>
+                    <li><strong>Data do Evento:</strong> {data_evento}</li>
+                    <li><strong>Carga Horária:</strong> {carga_horaria}</li>
+                    <li><strong>Data de Emissão:</strong> {data_emissao}</li>
+                    <li><strong>ID de Validação:</strong> {codigo}</li>
+                </ul>
+            </div>
+
+            <div class="cta-section" style="margin-top: 30px;">
+                <h2>🚀 Faça parte da mudança!</h2>
+                <p>Descubra como melhorar sua relação com a tecnologia.</p>
+                <a class="btn" href="https://www.equilibrionline.com.br/tdi/" target="_blank">Fazer TDI</a>
+                <a class="btn" href="https://www.equilibrionline.com.br/tdi-paisefilhos/" target="_blank">Fazer TDIPF</a>
+            </div>
+
+            <div class="cta-section" style="margin-top: 30px;">
+                <h2>💼 Quer levar isso para sua empresa?</h2>
+                <p>Aumente a produtividade e a saúde mental da sua equipe com o EquilibriON!</p>
+                <a class="btn" href="https://www.equilibrionline.com.br/solucoes-para-empresas/" target="_blank">Conheça nossos serviços</a>
+            </div>
+
+            <div style="margin-top: 30px;">
+                <a class="link" href="{base_url}/validar?codigo={codigo}">🔎 Validar Certificado</a><br>
+                <a class="link" href="/">🔙 Voltar ao Início</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+@app.errorhandler(404)
+def page_not_found(e):
+    base_url = get_secure_base_url()  # já existe no seu código!
+    
+    return f'''
+    <html>
+    <head>
+        <title>Página não encontrada</title>
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
+    </head>
+    <body>
+        <h1>❌ Página não encontrada</h1>
+        <p>A rota que você tentou acessar não existe ou foi removida.</p>
+        
+        <div style="margin-top: 20px;">
+            <a class="btn" href="{base_url}">🔙 Voltar para o início</a>
+        </div>
+    </body>
+    </html>
+    ''', 404
 
 
 

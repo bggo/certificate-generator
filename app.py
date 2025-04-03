@@ -597,11 +597,39 @@ def index():
             <h1>🎓 Bem-vindo ao Gerador de Certificados</h1>
 
             <div class="button-container">
-                <a href="/aluno" class="btn">🧑‍🎓 Emitir Certificado Individual</a>
-                <a href="/lote" class="btn">📂 Emitir Certificados em Lote (CSV)</a>
-                <a href="/turmas" class="btn">📋 Gerenciar Turmas</a>
-                <a href="/validar" class="btn">🔎 Validar Certificado</a>
-                <a href="/listagem" class="btn">📜 Listagem de Certificados</a>
+                <a href="/aluno" class="btn">🧑‍🎓 Emitir Certificado Individual</a><br>
+            </div>
+
+            <footer>
+                <p>&copy; {datetime.now().year} EquilibriON | Gerador de Certificados</p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    '''
+
+@app.route('/equilibrion-admin')
+def admin():
+    base_url = get_secure_base_url()
+
+    return f'''
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <title>Gerador de Certificados</title>
+        <link rel="stylesheet" href="{base_url}/static/styles.css">
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎓 Bem-vindo ao Gerador de Certificados</h1>
+
+            <div class="button-container">
+                <a href="/aluno" class="btn">🧑‍🎓 Emitir Certificado Individual</a><br>
+                <a href="/lote" class="btn">📂 Emitir Certificados em Lote (CSV)</a><br>
+                <a href="/turmas" class="btn">📋 Gerenciar Turmas</a><br>
+                <a href="/validar" class="btn">🔎 Validar Certificado</a><br>
+                <a href="/listagem" class="btn">📜 Listagem de Certificados</a><br>
             </div>
 
             <footer>
@@ -765,6 +793,20 @@ def aluno():
                 <a href="{linkedin_share_url}" target="_blank">🔗 Compartilhar no LinkedIn</a>
                 <a href="/">🔙 Voltar ao Início</a>
             </div>
+
+            <div class="cta-section" style="margin-top: 30px;">
+                <h2>🚀 Faça parte da mudança!</h2>
+                <p>Descubra como melhorar sua relação com a tecnologia.</p>
+                <a class="btn" href="https://www.equilibrionline.com.br/tdi/" target="_blank">Fazer TDI</a>
+                <a class="btn" href="https://www.equilibrionline.com.br/tdi-paisefilhos/" target="_blank">Fazer TDIPF</a>
+            </div>
+
+            <div class="cta-section" style="margin-top: 30px;">
+                <h2>💼 Quer levar isso para sua empresa?</h2>
+                <p>Aumente a produtividade e a saúde mental da sua equipe com o EquilibriON!</p>
+                <a class="btn" href="https://www.equilibrionline.com.br/solucoes-para-empresas/" target="_blank">Conheça nossos serviços</a>
+            </div>
+
         </body>
         </html>
         '''
@@ -779,7 +821,7 @@ def aluno():
     <body>
         <h1>Emitir Certificado</h1>
         <form action="/aluno" method="post">
-            <label for="name">Digite seu nome:</label><br>
+            <label for="name">Digite seu nome completo para emitir o certificado:</label><br>
             <input type="text" name="name" required><br><br>
 
             <label for="turma_id">Digite o código da turma:</label><br>
